@@ -16,3 +16,6 @@ archive/
 
 # Secrets
 .env
+
+# Archives
+*.zip
