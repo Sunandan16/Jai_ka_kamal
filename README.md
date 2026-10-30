@@ -89,6 +89,34 @@ deterministic graph and reports the failure. The winning model is recorded in
 `threat_assessment.json` (`llm_model`) and `investigation_graph.json`
 (`summary.llm_model`).
 
+### Multi-key rotation
+
+Any key value may be comma-separated — each key becomes its own attempt slot:
+
+```ini
+SENTINEL_LLM_API_KEY=gsk_key1,gsk_key2,gsk_key3
+```
+
+When one key is rate limited or out of token budget, Sentinel tries the next
+key of the same provider before failing over to the next provider. Only the
+last 4 characters of the winning key are ever recorded (`llm_key`).
+
+### Adaptive prompt tiers
+
+Every model is tried with three prompt sizes, biggest first:
+
+| Tier | Events | Edges | Purpose |
+|---|---|---|---|
+| full | 100 | 200 | maximum context (NVIDIA, paid tiers) |
+| medium | 25 | 50 | mid-sized free tiers |
+| small | 15 | 30 | tight budgets (e.g. Groq free tier, 8k tokens/min counted as input + output) |
+
+A provider whose budget cannot fit the full prompt (HTTP 413) automatically
+retries with the next smaller tier, and `max_tokens` is shrunk to fit the
+remaining budget — so the request adapts instead of failing. The winning
+model, tier, and key suffix are shown in the terminal (`Pipeline : ...`)
+and recorded in `threat_assessment.json` (`llm_model`, `llm_tier`, `llm_key`).
+
 ## Deterministic correlation rules
 
 `same_web_request`, `logged_in_then_acted`, `spawned_process`,

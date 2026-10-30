@@ -42,13 +42,22 @@ from .schemas import THREAT_LEVELS, validate_graph
 PROVIDERS = {
     "deepseek":   {"base_url": "https://api.deepseek.com/v1",              "model": "deepseek-chat"},
     "nvidia":     {"base_url": "https://integrate.api.nvidia.com/v1",      "model": "minimaxai/minimax-m3.1-flash"},
-    "groq":       {"base_url": "https://api.groq.com/openai/v1",           "model": "openai/gpt-oss-120b"},
+    "groq":       {"base_url": "https://api.groq.com/openai/v1",           "model": "openai/gpt-oss-120b", "tpm": 8000},
     "openai":     {"base_url": "https://api.openai.com/v1",                "model": "gpt-4o-mini"},
     "openrouter": {"base_url": "https://openrouter.ai/api/v1",             "model": "deepseek/deepseek-chat"},
 }
 
 MAX_EVENTS = 100
 MAX_EDGES = 200
+
+# Prompt tiers, biggest first. A provider whose token budget cannot fit the
+# full prompt (e.g. Groq free tier TPM limits) automatically retries with the
+# next smaller tier, so the request adapts instead of failing.
+TIERS = (
+    {"name": "full",   "max_events": 100, "max_edges": 200},
+    {"name": "medium", "max_events": 25,  "max_edges": 50},
+    {"name": "small",  "max_events": 15,  "max_edges": 30},
+)
 
 
 def load_dotenv(path: Path | None = None) -> Path | None:
@@ -94,31 +103,35 @@ def config_from_env() -> list[dict] | None:
 
     The primary provider is configured as before; SENTINEL_LLM_FAILOVER adds
     fallback `provider[:model]` entries, each keyed by SENTINEL_LLM_KEY_<PROVIDER>.
+    Every key value may itself be a comma-separated list: each key becomes its
+    own attempt slot, so rate-limited keys rotate instead of failing the run.
     Entries without a usable key are skipped and duplicates are collapsed.
     Returns the ordered list of configs, or None when nothing is configured.
     """
     chain: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
 
-    def add(provider: str, model: str, base_url: str, api_key: str) -> None:
+    def add(provider: str, model: str, base_url: str, api_keys: str) -> None:
         provider = provider.strip().lower()
         preset = PROVIDERS.get(provider, PROVIDERS["deepseek"])
         model = (model or "").strip() or preset["model"]
         base_url = (base_url or "").strip() or preset["base_url"]
         base_url = base_url.rstrip("/")
-        api_key = api_key.strip()
-        if not api_key:
-            return
-        dedupe_key = (base_url, model, api_key)
-        if dedupe_key in seen:
-            return
-        seen.add(dedupe_key)
-        chain.append({
-            "provider": provider,
-            "base_url": base_url,
-            "model": model,
-            "api_key": api_key,
-        })
+        for api_key in api_keys.split(","):
+            api_key = api_key.strip()
+            if not api_key:
+                continue
+            dedupe_key = (base_url, model, api_key)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            chain.append({
+                "provider": provider,
+                "base_url": base_url,
+                "model": model,
+                "api_key": api_key,
+                "tpm": preset.get("tpm"),  # tokens-per-minute budget, when the provider enforces one
+            })
 
     add(
         os.environ.get("SENTINEL_LLM_PROVIDER", "deepseek"),
@@ -138,9 +151,14 @@ def config_from_env() -> list[dict] | None:
     return chain or None
 
 
-def build_prompt(scenario_id: str, events: list[dict], graph: dict) -> dict:
-    """The instruction JSON shown to the LLM (and saved for transparency)."""
-    suspicious = [e for e in events if e.get("suspicious")][:MAX_EVENTS]
+def build_prompt(scenario_id: str, events: list[dict], graph: dict, tier: dict | None = None) -> dict:
+    """The instruction JSON shown to the LLM (and saved for transparency).
+
+    ``tier`` controls how much context is sent (see TIERS): full -> medium ->
+    small, so providers with small token budgets still get a usable prompt.
+    """
+    tier = tier or TIERS[0]
+    suspicious = [e for e in events if e.get("suspicious")][:tier["max_events"]]
     return {
         "task": (
             "You are a security analyst co-pilot. Given defender-side normalized log events "
@@ -148,6 +166,7 @@ def build_prompt(scenario_id: str, events: list[dict], graph: dict) -> dict:
             "attack chain, and a threat assessment."
         ),
         "scenario_id": scenario_id,
+        "tier": tier["name"],
         "output_schema": {
             "edges": [{"from": "<node id>", "to": "<node id>", "relation": "<label>",
                        "reason": "<why, citing event ids>", "confidence": 0.0,
@@ -175,44 +194,87 @@ def build_prompt(scenario_id: str, events: list[dict], graph: dict) -> dict:
                     "cmdline": e.get("cmdline"), "mitre_ids": e.get("mitre_ids"),
                     "source_file": e.get("source_file"), "source_line": e.get("source_line")}
                    for e in suspicious],
-        "baseline_edges": graph.get("edges", [])[:MAX_EDGES],
+        "baseline_edges": graph.get("edges", [])[:tier["max_edges"]],
         "baseline_chain": graph.get("attack_chain", []),
     }
 
 
-def call_llm(prompt: dict, cfgs: list[dict], timeout: int = 360) -> tuple[dict | None, str | None]:
-    """Try every configured model in order, failing over automatically.
+def call_llm(tier_prompts: list[tuple[str, dict]], cfgs: list[dict],
+              timeout: int = 360) -> tuple[dict | None, str | None, str | None, str | None]:
+    """Try every (key, tier) combination until one answers.
 
-    A rate limit (HTTP 429), auth failure, outage, network error, or
-    unparseable response moves the call to the next model so the pipeline
-    keeps working without stopping. Returns (parsed_response, model_name);
-    the response is None only when every configured model failed.
+    tier_prompts: list of (tier_name, prompt), biggest tier first.
+    cfgs: ordered list of model/key configs (each key is one attempt slot).
+
+    Failure-aware routing:
+      - HTTP 413 (prompt too large) -> same key, next smaller tier
+      - HTTP 429 (rate limited)     -> next key/provider, full tier again
+      - auth / outage / transport   -> next key/provider, full tier again
+      - invalid JSON                -> next smaller tier, then next key/provider
+
+    Returns (parsed_response, model_name, tier_name, key_suffix); the response
+    is None only when every key at every tier failed.
     """
-    messages = [
-        {"role": "system", "content": "You return strictly valid JSON. No markdown, no commentary."},
-        {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
-    ]
+    message_cache: dict[str, list[dict]] = {}
+
+    def messages_for(tier_name: str, prompt: dict) -> list[dict]:
+        if tier_name not in message_cache:
+            message_cache[tier_name] = [
+                {"role": "system", "content":
+                    "You return strictly valid JSON. No markdown, no commentary. "
+                    "Be concise: short reasons, only the most important edges and chain steps."},
+                {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+            ]
+        return message_cache[tier_name]
+
     for index, cfg in enumerate(cfgs):
-        parsed = _call_one(cfg, messages, timeout)
-        if parsed is not None:
-            if index:
-                print(f"[llm] failover OK: switched to {cfg['model']} after {index} model(s) failed")
-            return parsed, cfg["model"]
-        if index + 1 < len(cfgs):
-            print(f"[llm] {cfg['model']} failed; switching to {cfgs[index + 1]['model']} ...")
-    print("[llm] every configured model failed; keeping deterministic output")
-    return None, None
+        suffix = cfg["api_key"][-4:]
+        for tier_name, prompt in tier_prompts:
+            outcome = _call_one(cfg, messages_for(tier_name, prompt), timeout)
+            if outcome["ok"]:
+                if index:
+                    print(f"[llm] failover OK: {cfg['model']} answered (tier {tier_name}, key ...{suffix}) after {index} key(s) failed")
+                else:
+                    print(f"[llm] {cfg['model']} answered (tier {tier_name}, key ...{suffix})")
+                return outcome["parsed"], cfg["model"], tier_name, suffix
+            reason = outcome["reason"]
+            if reason in ("rate_limited", "auth", "transport") or reason.startswith("http_"):
+                if reason == "rate_limited":
+                    print(f"[llm] {cfg['model']} rate limited (429) on key ...{suffix}; trying next key")
+                elif reason == "auth":
+                    print(f"[llm] {cfg['model']} auth failed on key ...{suffix}; trying next key")
+                else:
+                    print(f"[llm] {cfg['model']} {reason} on key ...{suffix}; trying next key")
+                break  # smaller tiers will not help; move to the next key/provider
+            if reason == "too_large":
+                print(f"[llm] {cfg['model']} prompt too large at tier {tier_name}; trying smaller tier")
+                continue
+            print(f"[llm] {cfg['model']} returned no valid JSON at tier {tier_name}; trying smaller tier")
+    print("[llm] every key and tier failed; keeping deterministic output")
+    return None, None, None, None
 
 
-def _call_one(cfg: dict, messages: list[dict], timeout: int) -> dict | None:
-    """Call a single model: JSON-object mode first, then plain mode if the
-    provider rejects response_format. Returns parsed JSON or None."""
+def _call_one(cfg: dict, messages: list[dict], timeout: int) -> dict:
+    """Call a single key: JSON-object mode first, then plain mode if the
+    provider rejects response_format.
+
+    Returns {"ok": bool, "parsed": dict|None, "reason": str} where reason is
+    one of: ok | too_large | rate_limited | auth | transport | http_<code> |
+    invalid_json.
+    """
     model = cfg["model"]
     for use_json_mode in (True, False):
+        # Providers that enforce a tokens-per-minute budget (e.g. Groq free
+        # tier) count input + requested output against it. Shrink max_tokens
+        # to fit so the request passes instead of failing with HTTP 413.
+        est_input = sum(len(str(m.get("content", ""))) for m in messages) // 4
+        max_tokens = 8000
+        if cfg.get("tpm"):
+            max_tokens = max(1200, min(8000, cfg["tpm"] - est_input - 300))
         body = {
             "model": model,
             "temperature": 0,
-            "max_tokens": 8000,
+            "max_tokens": max_tokens,
             "messages": messages,
         }
         if use_json_mode:
@@ -228,26 +290,29 @@ def _call_one(cfg: dict, messages: list[dict], timeout: int) -> dict | None:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            if use_json_mode and exc.code in (400, 422):
-                print(f"[llm] {model} rejected JSON mode (HTTP {exc.code}); retrying plain mode")
+            code = exc.code
+            if use_json_mode and code in (400, 422):
+                print(f"[llm] {model} rejected JSON mode (HTTP {code}); retrying plain mode")
                 continue  # model does not accept response_format; retry without it
-            if exc.code == 429:
-                print(f"[llm] {model} rate limited (HTTP 429)")
-            else:
-                print(f"[llm] {model} HTTP {exc.code}: {_error_detail(exc)}")
-            return None
+            if code == 413:
+                return {"ok": False, "parsed": None, "reason": "too_large"}
+            if code == 429:
+                return {"ok": False, "parsed": None, "reason": "rate_limited"}
+            if code in (401, 403):
+                return {"ok": False, "parsed": None, "reason": "auth"}
+            print(f"[llm] {model} HTTP {code}: {_error_detail(exc)}")
+            return {"ok": False, "parsed": None, "reason": f"http_{code}"}
         except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
             print(f"[llm] {model} network/transport error: {exc}")
-            return None
+            return {"ok": False, "parsed": None, "reason": "transport"}
         content = (payload.get("choices") or [{}])[0].get("message", {}).get("content")
         if content:
             parsed = _parse_json_content(content)
             if parsed is not None:
-                return parsed
+                return {"ok": True, "parsed": parsed, "reason": "ok"}
         if use_json_mode:
             continue
-    print(f"[llm] {model} returned no valid JSON")
-    return None
+    return {"ok": False, "parsed": None, "reason": "invalid_json"}
 
 
 def _error_detail(exc: urllib.error.HTTPError) -> str:
