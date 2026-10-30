@@ -34,6 +34,14 @@ PYTHONPATH=src python -m sentinel <scenario-folder>
 sentinel <scenario-folder>
 ```
 
+Flags:
+
+| Flag | Effect |
+|---|---|
+| `--quiet` | minimal summary (threat line + attack chain only) |
+| `--full` | suspicious-evidence table includes `source_file:source_line` |
+| `--evaluate` | compare the result with attacker ground truth (`attacker/logs/attackmate.json`) and write `evaluation.json` — attacker files are read **only** in this mode |
+
 Artifacts are written to `rca_output/<scenario>/`:
 
 | File | Content |
@@ -44,6 +52,7 @@ Artifacts are written to `rca_output/<scenario>/`:
 | `hypotheses.json` | ranked candidate explanations |
 | `correlation_prompt.json` | exactly what was sent to the LLM (transparency) |
 | `llm_response.json` | validated LLM output (only when the LLM stage runs) |
+| `evaluation.json` | ground-truth comparison (only with `--evaluate`) |
 | `rca_report.md` | human-readable report |
 
 ## LLM stage (optional)
@@ -93,6 +102,14 @@ deterministic graph and reports the failure. The winning model is recorded in
 threat card, attack chain, hypotheses, graph export). It currently shows
 embedded sample data; wiring it to `rca_output/<scenario>/` is the next step.
 
+## Roadmap
+
+- **Batch mode** (planned): `sentinel batch Data/manifestations_filtered/sequences` —
+  run every scenario, print a per-scenario summary table (events, threat level,
+  chain length, top hypothesis) and an aggregate coverage report.
+- **Frontend wiring** (next): fetch `rca_output/<scenario>/` artifacts into the
+  existing blue/white dashboard (logs table, threat card, attack chain, graph).
+
 ## Layout
 
 ```
@@ -100,8 +117,9 @@ rca_engine.py          compatibility wrapper (delegates to the package)
 src/sentinel/          pipeline package
   normalizer.py        parsers + provenance + DNS burst detection
   correlation.py       deterministic rules + graph + chain derivation
-  llm_client.py        provider-agnostic LLM call, prompt, validation
+  llm_client.py        provider-agnostic LLM call, prompt, validation, failover
   threat.py            threat assessment + hypothesis ranking
+  evaluate.py          ground-truth comparison (--evaluate only)
   schemas.py           frozen JSON contracts
   pipeline.py          orchestration + CLI
 Data/manifestations_filtered/   dataset (gitignored)

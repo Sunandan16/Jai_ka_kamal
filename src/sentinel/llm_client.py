@@ -42,7 +42,7 @@ from .schemas import THREAT_LEVELS, validate_graph
 PROVIDERS = {
     "deepseek":   {"base_url": "https://api.deepseek.com/v1",              "model": "deepseek-chat"},
     "nvidia":     {"base_url": "https://integrate.api.nvidia.com/v1",      "model": "minimaxai/minimax-m3.1-flash"},
-    "groq":       {"base_url": "https://api.groq.com/openai/v1",           "model": "llama-3.3-70b-versatile"},
+    "groq":       {"base_url": "https://api.groq.com/openai/v1",           "model": "openai/gpt-oss-120b"},
     "openai":     {"base_url": "https://api.openai.com/v1",                "model": "gpt-4o-mini"},
     "openrouter": {"base_url": "https://openrouter.ai/api/v1",             "model": "deepseek/deepseek-chat"},
 }
@@ -220,7 +220,8 @@ def _call_one(cfg: dict, messages: list[dict], timeout: int) -> dict | None:
         request = urllib.request.Request(
             f"{cfg['base_url']}/chat/completions",
             data=json.dumps(body).encode("utf-8"),
-            headers={"Authorization": f"Bearer {cfg['api_key']}", "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {cfg['api_key']}", "Content-Type": "application/json",
+                     "User-Agent": "Sentinel/0.2"},
             method="POST",
         )
         try:

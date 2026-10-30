@@ -1,8 +1,13 @@
 """Pipeline orchestration: normalize -> correlate -> LLM -> assess -> artifacts.
 
 Usage:
-    sentinel <scenario-folder>          (defaults to sequences/7-6)
+    sentinel <scenario-folder>            (defaults to sequences/7-6)
     python rca_engine.py <scenario-folder>
+
+Flags:
+    --quiet     minimal summary (threat line + chain only)
+    --full      suspicious evidence table includes source_file:line
+    --evaluate  compare the result with attacker ground truth (attackmate.json)
 """
 from __future__ import annotations
 
@@ -87,24 +92,7 @@ def run(root: Path, use_llm: bool = True) -> dict:
         indent=2, ensure_ascii=False), encoding="utf-8")
 
     _write_report(out, root.name, events, graph, threat, hypotheses)
-
-    # terminal summary
-    print()
-    print(f"Scenario : {root.name}")
-    print(f"Threat   : {threat['threat_level'].upper()} (score {threat['score']})")
-    print(f"Summary  : {threat['summary']}")
-    print(f"Entry    : {threat['entry_point']}")
-    print(f"Graph    : {graph['summary']['node_count']} nodes, {graph['summary']['edge_count']} edges")
-    print("Chain:")
-    print(chain_to_ascii(graph) or "(none)")
-    print()
-    print("Artifacts:")
-    for name in ("normalized_events.jsonl", "investigation_graph.json", "threat_assessment.json",
-                 "hypotheses.json", "correlation_prompt.json", "rca_report.md"):
-        path = out / name
-        if path.exists():
-            print(f"  {path}")
-    return {"events": events, "graph": graph, "threat": threat}
+    return {"events": events, "graph": graph, "threat": threat, "hypotheses": hypotheses}
 
 
 def _write_report(out: Path, name: str, events, graph, threat, hypotheses) -> None:
@@ -127,12 +115,105 @@ def _write_report(out: Path, name: str, events, graph, threat, hypotheses) -> No
     (out / "rca_report.md").write_text(report, encoding="utf-8")
 
 
+def print_summary(result: dict, mode: str = "normal") -> None:
+    """Rich terminal summary. mode: 'normal' | 'quiet' | 'full'."""
+    events, graph = result["events"], result["graph"]
+    threat, hypotheses = result["threat"], result["hypotheses"]
+    scenario = graph["scenario_id"]
+    model = threat.get("llm_model")
+    print()
+    print("=" * 66)
+    print(f"  Scenario : {scenario}")
+    print(f"  Pipeline : {threat.get('generator', 'deterministic')}" + (f" · {model}" if model else ""))
+    print(f"  Threat   : {threat['threat_level'].upper()}  (score {threat['score']})")
+    print(f"  Events   : {len(events)} ({sum(1 for e in events if e.get('suspicious'))} suspicious) · "
+          f"{graph['summary']['node_count']} nodes · {graph['summary']['edge_count']} edges")
+    print(f"  Summary  : {threat['summary']}")
+    print(f"  Entry    : {threat['entry_point']}")
+    print("=" * 66)
+
+    if mode == "quiet":
+        print("  Chain:")
+        for line in chain_to_ascii(graph).splitlines():
+            print(f"    {line}")
+        return
+
+    mitre = [m for m in (threat.get("mitre_techniques") or []) if isinstance(m, dict) and m.get("id")]
+    if mitre:
+        print()
+        print("  MITRE ATT&CK")
+        for item in mitre:
+            row = f"    {item['id']}"
+            name = item.get("name") or ""
+            if name:
+                row += f"  {name}"
+            if item.get("confidence") is not None:
+                row += f"  ({float(item['confidence']):.2f})"
+            print(row)
+
+    print()
+    print("  Ranked Hypotheses")
+    for i, h in enumerate(hypotheses[:5], 1):
+        sources = len(set(h.get("supporting_sources", [])))
+        print(f"    #{i} {h['name'][:44]:<44} {h['confidence']:.2f}  ({sources} source{'s' if sources != 1 else ''})")
+
+    suspicious = [e for e in events if e.get("suspicious")]
+    limit = len(suspicious) if mode == "full" else min(12, len(suspicious))
+    note = f", showing {limit}" if len(suspicious) > limit else ""
+    print()
+    print(f"  Suspicious Evidence ({len(suspicious)} events{note})")
+    for e in suspicious[:limit]:
+        ts = e["timestamp"][11:19] if "T" in e["timestamp"] else str(e["timestamp"])[:19]
+        summary = " ".join(e["summary"].split())
+        if len(summary) > 70:
+            summary = summary[:67] + "..."
+        row = f"    {ts}  {e['event_type']:<16}  {summary}"
+        if mode == "full":
+            row += f"   [{e.get('source_file')}:{e.get('source_line')}]"
+        print(row)
+
+    print()
+    print("  Attack Chain")
+    for line in chain_to_ascii(graph).splitlines():
+        print(f"    {line}")
+
+    print()
+    print("  Artifacts:")
+    out = OUTPUT_ROOT / scenario
+    for name in ("normalized_events.jsonl", "investigation_graph.json", "threat_assessment.json",
+                 "hypotheses.json", "correlation_prompt.json", "llm_response.json",
+                 "evaluation.json", "rca_report.md"):
+        path = out / name
+        if path.exists():
+            print(f"    {path}")
+
+
 def cli(argv=None) -> None:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    root = Path(argv[0]) if argv else Path(DEFAULT_SCENARIO)
+    args = list(sys.argv[1:] if argv is None else argv)
+    flags = {"quiet": False, "full": False, "evaluate": False}
+    positionals = []
+    for arg in args:
+        if arg == "--quiet":
+            flags["quiet"] = True
+        elif arg == "--full":
+            flags["full"] = True
+        elif arg == "--evaluate":
+            flags["evaluate"] = True
+        elif arg.startswith("-"):
+            raise SystemExit(f"Unknown flag: {arg}. Available: --quiet, --full, --evaluate")
+        else:
+            positionals.append(arg)
+    root = Path(positionals[0]) if positionals else Path(DEFAULT_SCENARIO)
+
     result = run(root)
     events, graph = result["events"], result["graph"]
     assert not any("attacker" in e["source"] for e in events), "attacker labels must be excluded"
     assert events or not list(root.rglob("*.log")), "expected telemetry to produce events"
     assert all(edge["from"] in {n["id"] for n in graph["nodes"]} and edge["to"] in {n["id"] for n in graph["nodes"]}
                for edge in graph["edges"]), "every edge must reference existing nodes"
+
+    mode = "quiet" if flags["quiet"] else "full" if flags["full"] else "normal"
+    print_summary(result, mode)
+    if flags["evaluate"]:
+        from .evaluate import evaluate
+        evaluate(root, result)

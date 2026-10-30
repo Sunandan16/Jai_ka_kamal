@@ -5,9 +5,12 @@ the explainable baseline used when no LLM key is configured or the call fails.
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 from .schemas import THREAT_LEVELS
+
+TECH_RE = re.compile(r"T\d{4}(?:\.\d{3})?")
 
 
 def _level(score: float) -> str:
@@ -30,6 +33,8 @@ def assess(events: list[dict], graph: dict) -> dict:
     elf = any("elf" in f"{e.get('summary', '')} {e.get('raw_event', '')}".lower()
               or "executable" in str(e.get("mime_type", "")).lower() for e in suspicious)
     mitre = sorted({m for e in events for m in (e.get("mitre_ids") or []) if m})
+    # audit rule keys also carry technique ids (e.g. T1043_Commonly_Used_Port)
+    mitre = sorted(set(mitre) | {m for e in events for m in TECH_RE.findall(e.get("rule_key") or "")})
 
     score = (0.10
              + 0.10 * min(len({e["source"] for e in suspicious}), 4)
