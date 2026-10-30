@@ -1,0 +1,6 @@
+/* App.css — layout-level utilities. Theme lives in index.css */
+
+.App {
+    min-height: 100vh;
+    background: transparent;
+}

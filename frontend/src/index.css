@@ -1,0 +1,203 @@
+@import url("https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* RAKSHANAM — Muted Earth Palette
+   #9F6D79  dusty rose      -> critical / danger accent
+   #A4BCC2  soft blue-grey  -> primary accent (brand)
+   #A69F88  warm taupe      -> warning / secondary
+   #A7ACA2  cool sage grey  -> neutral / low
+*/
+:root {
+    --rk-bg: #13100f;
+    --rk-surface: #1c1817;
+    --rk-elevated: #231e1c;
+    --rk-border: #2e2822;
+    --rk-rose: #9f6d79;
+    --rk-blue: #a4bcc2;
+    --rk-blue-light: #c9dade;
+    --rk-taupe: #a69f88;
+    --rk-sage: #a7aca2;
+    --rk-text: #ece7e2;
+    --rk-text-muted: #a7aca2;
+}
+
+html,
+body,
+#root {
+    background: var(--rk-bg);
+    color: var(--rk-text);
+}
+
+body {
+    margin: 0;
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background:
+        radial-gradient(
+            circle at 15% -10%,
+            rgba(164, 188, 194, 0.09) 0%,
+            transparent 42%
+        ),
+        radial-gradient(
+            circle at 85% 110%,
+            rgba(159, 109, 121, 0.08) 0%,
+            transparent 42%
+        ),
+        #13100f;
+    min-height: 100vh;
+}
+
+h1,
+h2,
+h3,
+h4 {
+    font-family: "Outfit", "Inter", sans-serif;
+    letter-spacing: -0.01em;
+}
+
+.font-mono,
+code,
+.rk-mono {
+    font-family: "JetBrains Mono", monospace;
+}
+
+@layer base {
+    :root {
+        --background: 20 10% 7%;
+        --foreground: 30 12% 92%;
+        --card: 20 10% 10%;
+        --card-foreground: 30 12% 92%;
+        --popover: 20 10% 10%;
+        --popover-foreground: 30 12% 92%;
+        --primary: 190 20% 70%;
+        --primary-foreground: 20 12% 10%;
+        --secondary: 20 8% 16%;
+        --secondary-foreground: 30 12% 92%;
+        --muted: 20 8% 16%;
+        --muted-foreground: 90 4% 65%;
+        --accent: 190 20% 70%;
+        --accent-foreground: 20 12% 10%;
+        --destructive: 348 20% 53%;
+        --destructive-foreground: 30 12% 95%;
+        --border: 24 10% 18%;
+        --input: 24 10% 16%;
+        --ring: 190 20% 70%;
+        --radius: 0.75rem;
+    }
+}
+
+@layer base {
+    * {
+        @apply border-border;
+    }
+    body {
+        @apply text-foreground;
+    }
+}
+
+.rk-scroll::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+.rk-scroll::-webkit-scrollbar-track {
+    background: transparent;
+}
+.rk-scroll::-webkit-scrollbar-thumb {
+    background: rgba(164, 188, 194, 0.22);
+    border-radius: 999px;
+}
+.rk-scroll::-webkit-scrollbar-thumb:hover {
+    background: rgba(164, 188, 194, 0.4);
+}
+
+@keyframes rk-pulse-dot {
+    0%,
+    100% {
+        box-shadow: 0 0 0 0 rgba(164, 188, 194, 0.6);
+    }
+    50% {
+        box-shadow: 0 0 0 8px rgba(164, 188, 194, 0);
+    }
+}
+.rk-pulse-dot {
+    animation: rk-pulse-dot 2s infinite;
+}
+
+@keyframes rk-slide-in {
+    from {
+        opacity: 0;
+        transform: translateY(-6px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+.rk-slide-in {
+    animation: rk-slide-in 0.4s ease-out;
+}
+
+@keyframes rk-shimmer {
+    0% {
+        background-position: -200% 0;
+    }
+    100% {
+        background-position: 200% 0;
+    }
+}
+.rk-shimmer-text {
+    background: linear-gradient(
+        90deg,
+        #a7aca2 0%,
+        #a4bcc2 50%,
+        #a7aca2 100%
+    );
+    background-size: 200% auto;
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: rk-shimmer 4s linear infinite;
+}
+
+.rk-card {
+    background: rgba(28, 24, 23, 0.85);
+    border: 1px solid var(--rk-border);
+    border-radius: 1rem;
+    backdrop-filter: blur(8px);
+}
+
+.rk-card-hover {
+    transition:
+        border-color 0.2s ease,
+        transform 0.2s ease,
+        box-shadow 0.2s ease;
+}
+.rk-card-hover:hover {
+    border-color: rgba(164, 188, 194, 0.35);
+    box-shadow: 0 10px 30px -15px rgba(164, 188, 194, 0.3);
+}
+
+.rk-grid-bg {
+    background-image:
+        linear-gradient(rgba(164, 188, 194, 0.06) 1px, transparent 1px),
+        linear-gradient(
+            90deg,
+            rgba(164, 188, 194, 0.06) 1px,
+            transparent 1px
+        );
+    background-size: 36px 36px;
+}
+
+@keyframes rk-dash {
+    to {
+        stroke-dashoffset: -24;
+    }
+}
+.rk-edge-animated {
+    stroke-dasharray: 4 6;
+    animation: rk-dash 1.4s linear infinite;
+}
