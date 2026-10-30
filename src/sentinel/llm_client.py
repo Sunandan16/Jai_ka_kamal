@@ -14,9 +14,19 @@ output.
 
 Configuration (environment variables, provider presets below):
     SENTINEL_LLM_PROVIDER   default "deepseek"  (deepseek|nvidia|groq|openai|openrouter)
-    SENTINEL_LLM_API_KEY    the API key; if unset, the LLM stage is skipped
+    SENTINEL_LLM_API_KEY    the primary API key; if unset, the LLM stage is skipped
     SENTINEL_LLM_MODEL      optional model override
     SENTINEL_LLM_BASE_URL   optional base URL override
+    SENTINEL_LLM_FAILOVER   optional fallback chain: comma-separated
+                            "provider[:model]" entries tried in order after
+                            the primary when a call fails (rate limit, auth
+                            error, outage, or invalid output)
+    SENTINEL_LLM_KEY_<PROVIDER>  API key for a failover provider, e.g.
+                            SENTINEL_LLM_KEY_NVIDIA=nvapi-...
+
+The pipeline never stops on a single model limit: every configured model is
+tried in order, and only when all of them fail does the deterministic graph
+stand alone.
 """
 from __future__ import annotations
 
@@ -31,7 +41,7 @@ from .schemas import THREAT_LEVELS, validate_graph
 
 PROVIDERS = {
     "deepseek":   {"base_url": "https://api.deepseek.com/v1",              "model": "deepseek-chat"},
-    "nvidia":     {"base_url": "https://integrate.api.nvidia.com/v1",      "model": "nvidia/nemotron-3.5-lightning-30b-a3b"},
+    "nvidia":     {"base_url": "https://integrate.api.nvidia.com/v1",      "model": "minimaxai/minimax-m3.1-flash"},
     "groq":       {"base_url": "https://api.groq.com/openai/v1",           "model": "llama-3.3-70b-versatile"},
     "openai":     {"base_url": "https://api.openai.com/v1",                "model": "gpt-4o-mini"},
     "openrouter": {"base_url": "https://openrouter.ai/api/v1",             "model": "deepseek/deepseek-chat"},
@@ -69,18 +79,63 @@ def load_dotenv(path: Path | None = None) -> Path | None:
 load_dotenv()  # make .env values visible to config_from_env()
 
 
-def config_from_env() -> dict | None:
-    provider = os.environ.get("SENTINEL_LLM_PROVIDER", "deepseek").lower()
-    api_key = os.environ.get("SENTINEL_LLM_API_KEY", "").strip()
-    if not api_key:
-        return None
-    preset = PROVIDERS.get(provider, PROVIDERS["deepseek"])
-    return {
-        "provider": provider,
-        "base_url": (os.environ.get("SENTINEL_LLM_BASE_URL") or preset["base_url"]).rstrip("/"),
-        "model": os.environ.get("SENTINEL_LLM_MODEL") or preset["model"],
-        "api_key": api_key,
-    }
+FAILOVER_ENV = "SENTINEL_LLM_FAILOVER"
+
+
+def _failover_key_env(provider: str) -> str:
+    """Env var name holding the key for a failover provider, e.g.
+    SENTINEL_LLM_KEY_NVIDIA."""
+    normalized = re.sub(r"[^A-Z0-9]", "", provider.upper())
+    return f"SENTINEL_LLM_KEY_{normalized}"
+
+
+def config_from_env() -> list[dict] | None:
+    """Build the model failover chain from the environment.
+
+    The primary provider is configured as before; SENTINEL_LLM_FAILOVER adds
+    fallback `provider[:model]` entries, each keyed by SENTINEL_LLM_KEY_<PROVIDER>.
+    Entries without a usable key are skipped and duplicates are collapsed.
+    Returns the ordered list of configs, or None when nothing is configured.
+    """
+    chain: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def add(provider: str, model: str, base_url: str, api_key: str) -> None:
+        provider = provider.strip().lower()
+        preset = PROVIDERS.get(provider, PROVIDERS["deepseek"])
+        model = (model or "").strip() or preset["model"]
+        base_url = (base_url or "").strip() or preset["base_url"]
+        base_url = base_url.rstrip("/")
+        api_key = api_key.strip()
+        if not api_key:
+            return
+        dedupe_key = (base_url, model, api_key)
+        if dedupe_key in seen:
+            return
+        seen.add(dedupe_key)
+        chain.append({
+            "provider": provider,
+            "base_url": base_url,
+            "model": model,
+            "api_key": api_key,
+        })
+
+    add(
+        os.environ.get("SENTINEL_LLM_PROVIDER", "deepseek"),
+        os.environ.get("SENTINEL_LLM_MODEL", "") or "",
+        os.environ.get("SENTINEL_LLM_BASE_URL", "") or "",
+        os.environ.get("SENTINEL_LLM_API_KEY", "") or "",
+    )
+
+    for entry in (os.environ.get(FAILOVER_ENV, "") or "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        provider, sep, model = entry.partition(":")
+        key_env = _failover_key_env(provider)
+        add(provider, model if sep else "", "", os.environ.get(key_env, "") or "")
+
+    return chain or None
 
 
 def build_prompt(scenario_id: str, events: list[dict], graph: dict) -> dict:
@@ -125,17 +180,39 @@ def build_prompt(scenario_id: str, events: list[dict], graph: dict) -> dict:
     }
 
 
-def call_llm(prompt: dict, cfg: dict, timeout: int = 300) -> dict | None:
-    """Chat completions call with JSON-object mode; retries plain mode if the
-    model rejects it, and recovers JSON from fenced/mixed responses."""
+def call_llm(prompt: dict, cfgs: list[dict], timeout: int = 360) -> tuple[dict | None, str | None]:
+    """Try every configured model in order, failing over automatically.
+
+    A rate limit (HTTP 429), auth failure, outage, network error, or
+    unparseable response moves the call to the next model so the pipeline
+    keeps working without stopping. Returns (parsed_response, model_name);
+    the response is None only when every configured model failed.
+    """
     messages = [
         {"role": "system", "content": "You return strictly valid JSON. No markdown, no commentary."},
         {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
     ]
-    for attempt, use_json_mode in enumerate((True, False)):
+    for index, cfg in enumerate(cfgs):
+        parsed = _call_one(cfg, messages, timeout)
+        if parsed is not None:
+            if index:
+                print(f"[llm] failover OK: switched to {cfg['model']} after {index} model(s) failed")
+            return parsed, cfg["model"]
+        if index + 1 < len(cfgs):
+            print(f"[llm] {cfg['model']} failed; switching to {cfgs[index + 1]['model']} ...")
+    print("[llm] every configured model failed; keeping deterministic output")
+    return None, None
+
+
+def _call_one(cfg: dict, messages: list[dict], timeout: int) -> dict | None:
+    """Call a single model: JSON-object mode first, then plain mode if the
+    provider rejects response_format. Returns parsed JSON or None."""
+    model = cfg["model"]
+    for use_json_mode in (True, False):
         body = {
-            "model": cfg["model"],
+            "model": model,
             "temperature": 0,
+            "max_tokens": 8000,
             "messages": messages,
         }
         if use_json_mode:
@@ -149,10 +226,17 @@ def call_llm(prompt: dict, cfg: dict, timeout: int = 300) -> dict | None:
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, TimeoutError, ValueError) as exc:
-            if use_json_mode and isinstance(exc, urllib.error.HTTPError) and exc.code in (400, 422):
+        except urllib.error.HTTPError as exc:
+            if use_json_mode and exc.code in (400, 422):
+                print(f"[llm] {model} rejected JSON mode (HTTP {exc.code}); retrying plain mode")
                 continue  # model does not accept response_format; retry without it
-            print(f"[llm] call failed: {exc}")
+            if exc.code == 429:
+                print(f"[llm] {model} rate limited (HTTP 429)")
+            else:
+                print(f"[llm] {model} HTTP {exc.code}: {_error_detail(exc)}")
+            return None
+        except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
+            print(f"[llm] {model} network/transport error: {exc}")
             return None
         content = (payload.get("choices") or [{}])[0].get("message", {}).get("content")
         if content:
@@ -161,8 +245,25 @@ def call_llm(prompt: dict, cfg: dict, timeout: int = 300) -> dict | None:
                 return parsed
         if use_json_mode:
             continue
-        print("[llm] response was not valid JSON; keeping deterministic output")
+    print(f"[llm] {model} returned no valid JSON")
     return None
+
+
+def _error_detail(exc: urllib.error.HTTPError) -> str:
+    """Extract a short provider error message from an HTTP error body."""
+    try:
+        body = exc.read().decode("utf-8", "replace").strip()
+        if body:
+            data = json.loads(body)
+            err = data.get("error") if isinstance(data, dict) else None
+            if isinstance(err, dict) and err.get("message"):
+                return str(err["message"])[:200]
+            if isinstance(err, str) and err:
+                return err[:200]
+            return body[:200].replace("\n", " ")
+    except Exception:
+        pass
+    return str(exc.reason or exc.code)
 
 
 def _parse_json_content(content: str) -> dict | None:

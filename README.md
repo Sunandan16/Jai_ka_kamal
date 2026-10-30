@@ -55,15 +55,30 @@ validated against the event store (unknown IDs are dropped, scores clamped).
 
 ```ini
 # .env
-SENTINEL_LLM_PROVIDER=deepseek     # deepseek | nvidia | groq | openai | openrouter
-SENTINEL_LLM_API_KEY=sk-...        # nvapi-... / sk-... / gsk_...
-SENTINEL_LLM_MODEL=                # optional; empty = provider default
-SENTINEL_LLM_BASE_URL=             # optional; empty = provider default
+SENTINEL_LLM_PROVIDER=groq        # deepseek | nvidia | groq | openai | openrouter
+SENTINEL_LLM_API_KEY=gsk_...      # nvapi-... / sk-... / gsk_...
+SENTINEL_LLM_MODEL=               # optional; empty = provider default
+SENTINEL_LLM_BASE_URL=            # optional; empty = provider default
+
+# Multi-model failover (optional): tried in order after the primary.
+# On a rate limit (HTTP 429), auth error, outage, or invalid output,
+# Sentinel switches to the next model instead of stopping.
+SENTINEL_LLM_FAILOVER=nvidia:minimaxai/minimax-m3.1-flash,deepseek:deepseek-chat
+SENTINEL_LLM_KEY_NVIDIA=nvapi-... # one key per failover provider
+SENTINEL_LLM_KEY_DEEPSEEK=sk-...
 ```
 
+NVIDIA default model: `minimaxai/minimax-m3.1-flash` (verified working with
+JSON-mode responses; note that NVIDIA's reasoning models can consume their
+whole output budget on `reasoning_content`, and several catalog entries
+return 404 for developer keys). Any catalog model can be pinned with
+`SENTINEL_LLM_MODEL=`.
+
 The same variables also work as normal environment variables (env wins over
-`.env`). If the LLM call fails for any reason, the pipeline keeps the
-deterministic graph and reports the failure.
+`.env`). If every configured model fails, the pipeline keeps the
+deterministic graph and reports the failure. The winning model is recorded in
+`threat_assessment.json` (`llm_model`) and `investigation_graph.json`
+(`summary.llm_model`).
 
 ## Deterministic correlation rules
 

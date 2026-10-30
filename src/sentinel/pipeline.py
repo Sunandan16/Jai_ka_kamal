@@ -52,23 +52,26 @@ def run(root: Path, use_llm: bool = True) -> dict:
     graph = build_graph(root.name, events)
 
     threat = assess(events, graph)
-    llm_cfg = config_from_env() if use_llm else None
+    llm_cfgs = config_from_env() if use_llm else None
     prompt = build_prompt(root.name, events, graph)
     (out / "correlation_prompt.json").write_text(json.dumps(prompt, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    if llm_cfg:
-        print(f"[3/4] Correlating with LLM ({llm_cfg['model']}) ...")
-        response = call_llm(prompt, llm_cfg)
+    if llm_cfgs:
+        chain_desc = " -> ".join(c["model"] for c in llm_cfgs)
+        print(f"[3/4] Correlating with LLM ({chain_desc}) ...")
+        response, llm_model = call_llm(prompt, llm_cfgs)
         if response:
             (out / "llm_response.json").write_text(json.dumps(response, indent=2, ensure_ascii=False), encoding="utf-8")
             overrides = merge_llm_output(response, graph, {e["event_id"] for e in events})
             for key, value in overrides.items():
                 threat[key] = value
             threat["generator"] = "hybrid(deterministic+llm)"
+            threat["llm_model"] = llm_model
             graph["generator"] = "sentinel-hybrid"
-            print(f"      added {graph['summary'].get('llm_edges_added', 0)} validated LLM edges")
+            graph["summary"]["llm_model"] = llm_model
+            print(f"      added {graph['summary'].get('llm_edges_added', 0)} validated LLM edges (via {llm_model})")
         else:
-            print("      LLM failed or unavailable; keeping deterministic graph")
+            print("      all configured LLM models failed or unavailable; keeping deterministic graph")
     else:
         print("[3/4] No SENTINEL_LLM_API_KEY set; skipping LLM stage (deterministic only)")
 
