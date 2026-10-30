@@ -1,0 +1,112 @@
+{
+  "architecture_name": "Explainable Hypothesis-Driven Root Cause Analysis (RCA) Pipeline for Security Incident Investigation",
+  "summary": "An 8-stage security analytics architecture that ingests heterogeneous telemetry, normalizes it into a common schema, correlates events into a time-aware investigation graph, and then runs an iterative hypothesis-and-evidence loop to rank possible explanations. The result is a reconstructed attack timeline and an explainable RCA report with a dashboard.",
+  "architecture_type": "Layered data pipeline with an iterative reasoning loop (SIEM / XDR-style forensic investigation)",
+  "data_flow": "Telemetry Sources -> Ingestion & Normalization -> Unified Event Store -> Correlation Engine -> Investigation Graph -> Hypothesis & Evidence Engine (loop) -> Timeline Reconstruction -> Explainable RCA Report & Dashboard",
+  "stages": [
+    {
+      "id": 1,
+      "name": "Telemetry Data Sources",
+      "purpose": "Raw logs collected from across the environment",
+      "components": [
+        {"name": "Authentication Logs", "detail": "logins, sessions"},
+        {"name": "Process Logs", "detail": "process start/stop"},
+        {"name": "Network Logs", "detail": "connections, flows"},
+        {"name": "DNS Logs", "detail": "queries, responses"},
+        {"name": "Other Logs", "detail": "OS, system, alerts"}
+      ]
+    },
+    {
+      "id": 2,
+      "name": "Ingestion & Normalization",
+      "purpose": "Convert diverse log formats into uniform records",
+      "components": [
+        "Parse different formats",
+        "Extract key fields",
+        "Map to common schema",
+        "Add timestamps & entity IDs"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "Unified Event Store",
+      "purpose": "Single repository of normalized events",
+      "common_schema_fields": [
+        "timestamp",
+        "event_type",
+        "host, user, process_id",
+        "src/dst IP",
+        "attributes",
+        "source_reference"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "Correlation Engine",
+      "purpose": "Connect related events and surface suspicious patterns",
+      "components": [
+        "Link related events (same host/user/process)",
+        "Time window correlation",
+        "Behavioral rules (suspicious patterns)",
+        "Build entity relationships (hosts, users, processes, IPs)"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "Investigation Graph",
+      "purpose": "Time-aware graph of events and entities",
+      "node_types": ["User", "Host", "Process", "File", "Network", "DNS"],
+      "central_node": "Process"
+    },
+    {
+      "id": 6,
+      "name": "Hypothesis & Evidence Engine (Investigation Loop)",
+      "purpose": "Iteratively form, test and rank explanations of an incident",
+      "steps": [
+        {"id": "6.1", "name": "Detect Incident Candidates", "detail": "Find suspicious activity using rules or anomalies"},
+        {"id": "6.2", "name": "Generate Hypotheses", "detail": "Multiple possible explanations, e.g. credential compromise, malicious process"},
+        {"id": "6.3", "name": "Derive Predictions", "detail": "What evidence should exist if the hypothesis is true"},
+        {"id": "6.4", "name": "Search for Evidence", "detail": "Find supporting, contradicting and missing evidence across telemetry"},
+        {"id": "6.5", "name": "Score & Rank Hypotheses", "detail": "Combine evidence, update confidence, rank explanations"}
+      ],
+      "feedback_loop": "Refine hypotheses and re-check evidence (iterative loop from 6.5 back to 6.1)"
+    },
+    {
+      "id": 7,
+      "name": "Timeline Reconstruction",
+      "purpose": "Identify earliest relevant event and reconstruct the attack chain",
+      "example_attack_chain": [
+        {"phase": "Initial Access", "time": "10:00"},
+        {"phase": "Execution", "time": "10:15"},
+        {"phase": "Lateral Movement", "time": "10:30"},
+        {"phase": "Data Access", "time": "10:45"},
+        {"phase": "Exfiltration", "time": "11:00"}
+      ]
+    },
+    {
+      "id": 8,
+      "name": "Explainable RCA Report & Dashboard",
+      "purpose": "Present findings, evidence and next steps",
+      "outputs": [
+        {"name": "Root Cause", "detail": "Most likely initial cause"},
+        {"name": "Attack Timeline", "detail": "Sequence of events"},
+        {"name": "Evidence Graph", "detail": "Hosts, users, processes, network"},
+        {"name": "Alternative Hypotheses", "detail": "Other explanations with confidence"}
+      ]
+    }
+  ],
+  "key_design_principles": [
+    "Normalization to a common schema enables cross-source correlation",
+    "Graph-based, time-aware representation of entities and events",
+    "Hypothesis-driven investigation: predictions are tested against supporting, contradicting and missing evidence",
+    "Iterative refinement with confidence scoring",
+    "Explainability: every conclusion is traceable to evidence, with alternatives shown",
+    "Maps naturally to attack-chain / MITRE ATT&CK-style phases"
+  ],
+  "use_cases": [
+    "Security incident investigation",
+    "Automated root cause analysis",
+    "Threat hunting",
+    "Digital forensics and incident response (DFIR)"
+  ]
+}

@@ -1,0 +1,273 @@
+{
+  "project": {
+    "name": "CAM-LDS Cybersecurity Root Cause Analysis Engine",
+    "workspace": "C:\\Users\\jaita\\OneDrive\\Documents\\hackathonz",
+    "objective": "Analyze defender-visible telemetry for a scenario, detect suspicious activity, reconstruct an evidence-backed attack timeline, identify likely attack entry points, and generate explainable root-cause findings.",
+    "design_principles": [
+      "Use attacker-side files only as ground truth after analysis, never as detection input.",
+      "Preserve source evidence in every normalized event.",
+      "Prefer deterministic, explainable correlation rules before statistical or machine-learning approaches.",
+      "Use Python standard library only unless a real requirement justifies a dependency."
+    ]
+  },
+  "dataset": {
+    "root": "manifestations_filtered",
+    "views": {
+      "sequences": "Complete attack scenarios. Primary input for attack-chain reconstruction.",
+      "steps": "Individual attack-step scenarios.",
+      "techniques": "Scenarios grouped by MITRE ATT&CK technique."
+    },
+    "attacker_folder_policy": {
+      "paths": ["attacker/logs/attackmate.json", "attacker/logs/attackmate.log", "attacker/logs/output.log"],
+      "meaning": "These files reveal planned attack actions, timing, commands, and often MITRE metadata. They are labels or ground truth.",
+      "engine_behavior": "The engine excludes every attacker-side file from analysis. Use those files later to evaluate whether the inferred attack chain is correct."
+    }
+  },
+  "implementation": {
+    "primary_engine": "C:\\Users\\jaita\\OneDrive\\Documents\\hackathonz\\rca_engine.py",
+    "run_command": "python .\\rca_engine.py .\\manifestations_filtered\\sequences\\<scenario-name>",
+    "outputs": {
+      "normalized_events": "rca_output/<scenario-name>/normalized_events.jsonl",
+      "rca_report": "rca_output/<scenario-name>/rca_report.md"
+    },
+    "current_behavior": [
+      "Recursively discovers supported defender-side logs inside the supplied scenario folder.",
+      "Parses source-specific records and converts them into a common event schema.",
+      "Sorts known timestamps into a timeline.",
+      "Groups suspicious evidence into candidate explanations.",
+      "Writes a JSON Lines event store and a Markdown investigation report.",
+      "Runs built-in assertions that attacker data was excluded and that scenario telemetry produced events when logs are present."
+    ],
+    "common_event_schema": {
+      "required": ["timestamp", "event_type", "source", "summary"],
+      "optional_by_source": [
+        "host",
+        "host_ip",
+        "user",
+        "src_ip",
+        "dst_ip",
+        "src_port",
+        "dst_port",
+        "process",
+        "executable",
+        "pid",
+        "parent_pid",
+        "domain",
+        "url",
+        "request_id",
+        "severity",
+        "mitre_ids",
+        "mitre_techniques",
+        "suspicious"
+      ]
+    }
+  },
+  "implemented_parsers": [
+    {
+      "source": "Wazuh alerts.json",
+      "event_type": "security_alert",
+      "extracts": ["timestamp", "host", "host IP", "rule severity", "rule description", "MITRE IDs", "MITRE techniques", "source IP", "destination user", "raw alert"],
+      "example": "In 2_cron-1, Wazuh identifies successful SSH authentication and maps it to Valid Accounts and Remote Services."
+    },
+    {
+      "source": "Linux audit.log",
+      "event_type": "process_activity",
+      "extracts": ["timestamp", "process", "executable", "UID", "PID", "parent PID", "audit rule key"],
+      "example": "In 7-6, audit records show sh, curl, chmod, and rJZMoLeJ executing after Nextcloud workflow activity."
+    },
+    {
+      "source": "auth.log, syslog, daemon.log, messages, kern.log",
+      "event_types": ["authentication", "dns_query", "persistence_change"],
+      "extracts": ["host", "user", "source IP", "login outcome", "domain", "raw system message"],
+      "example": "In 2_cron-1, auth.log records public-key SSH access to root from 192.42.1.174.",
+      "timestamp_note": "Classic syslog records may not include a year. If no defender-side source establishes the year, the event timestamp is recorded as unknown-year rather than assigning an invented value."
+    },
+    {
+      "source": "Suricata fast.log",
+      "event_type": "network_alert",
+      "extracts": ["timestamp", "signature", "source IP and port", "destination IP and port"],
+      "example": "In 7-6, Suricata sees an ELF file transfer and traffic involving port 4444."
+    },
+    {
+      "source": "Nextcloud nclog/audit.log",
+      "event_type": "authentication",
+      "extracts": ["timestamp", "user", "remote IP", "request ID", "login result", "URL"],
+      "example": "In 7-6, 192.42.1.174 successfully logs in as alice."
+    },
+    {
+      "source": "Nextcloud nclog/nextcloud.log",
+      "event_type": "web_activity",
+      "extracts": ["timestamp", "user", "remote IP", "request ID", "URL", "workflow or command message"],
+      "example": "In 7-6, a workflow contains curl, chmod, and execution of rJZMoLeJ."
+    },
+    {
+      "source": "Docker JSON container logs",
+      "event_type": "web_access",
+      "extracts": ["timestamp", "client IP", "HTTP method", "URL", "status"],
+      "example": "In 7-6, Docker access records show the external client making Nextcloud requests."
+    },
+    {
+      "source": "Apache access.log and access.log.1",
+      "event_type": "web_access",
+      "extracts": ["timestamp", "client IP", "HTTP method", "URL", "HTTP status"],
+      "example": "In 1_autostart_localaccount-5, 192.42.1.174 sends a POST request to /zm/index.php."
+    },
+    {
+      "source": "Squid access.log",
+      "event_type": "proxy_request",
+      "extracts": ["timestamp", "client IP", "HTTP method", "URL", "direct destination IP", "MIME type"],
+      "example": "In 6_macro_binary-11, a host requests http://dailynews-wire.com:8083/index with MIME type application/x-pie-executable."
+    },
+    {
+      "source": "DNS syslog from dnsmasq",
+      "event_type": "dns_query",
+      "extracts": ["timestamp", "DNS host", "requesting client IP", "queried domain"],
+      "example": "A client queries video.attackbed.com in 1_autostart_localaccount-2."
+    },
+    {
+      "source": "System persistence indicators",
+      "event_type": "persistence_change",
+      "detects": ["crontab", "authorized_keys", "useradd", "adduser", "usermod", "systemd unit path"],
+      "example": "In 1_autostart_localaccount-21, useradd creates the webadmin account; Wazuh independently records the added user and group."
+    }
+  ],
+  "verified_scenarios": [
+    {
+      "scenario": "sequences/7-6",
+      "result": "48 defender-visible normalized events",
+      "observed_chain": [
+        "192.42.1.174 successfully logs in to Nextcloud as alice.",
+        "The account creates or triggers a workflow with a command that downloads, marks executable, and runs rJZMoLeJ.",
+        "Linux audit confirms sh, curl, chmod, and rJZMoLeJ execution.",
+        "Suricata records executable transfer and traffic involving port 4444."
+      ],
+      "report": "rca_output/7-6/rca_report.md"
+    },
+    {
+      "scenario": "sequences/2_cron-1",
+      "result": "82 defender-visible normalized events after current parsers",
+      "observed_chain": [
+        "192.42.1.174 performs public-key SSH access as root.",
+        "Wazuh corroborates successful authentication and ATT&CK hints.",
+        "Linux audit captures activity following the access."
+      ],
+      "report": "rca_output/2_cron-1/rca_report.md"
+    },
+    {
+      "scenario": "sequences/6_macro_binary-11",
+      "result": "88 defender-visible normalized events",
+      "observed_chain": [
+        "Squid records a GET request for an executable from dailynews-wire.com:8083.",
+        "Suricata observes the associated web-server traffic.",
+        "Linux audit records curl execution immediately afterward."
+      ],
+      "report": "rca_output/6_macro_binary-11/rca_report.md"
+    },
+    {
+      "scenario": "sequences/1_autostart_localaccount-21",
+      "result": "8 defender-visible normalized events",
+      "observed_chain": [
+        "auth.log records group and user creation for webadmin.",
+        "Wazuh independently records the new user and group.",
+        "Suricata provides nearby network-alert evidence."
+      ],
+      "report": "rca_output/1_autostart_localaccount-21/rca_report.md"
+    }
+  ],
+  "current_detection_logic": {
+    "suspicious_indicators": [
+      "Successful external authentication.",
+      "Workflow or application messages containing run script, curl, chmod, or workflow activity.",
+      "Processes including curl, wget, chmod, nc, ncat, bash, sh, python, or perl.",
+      "Any Suricata alert.",
+      "Executable MIME types in Squid proxy logs.",
+      "POST, PUT, DELETE, upload, shell, or exploit patterns in Apache access records.",
+      "Account, cron, SSH-key, or systemd persistence changes."
+    ],
+    "candidate_explanations": [
+      "valid-account or remote-service access",
+      "web-application workflow or script execution",
+      "post-access command execution",
+      "account creation or persistence change",
+      "suspicious network transfer or command-and-control"
+    ],
+    "confidence": "A transparent, rule-based value derived from corroboration across suspicious evidence sources. It is not a trained probability model."
+  },
+  "not_yet_implemented": {
+    "correlation_engine": "Events are normalized and chronologically reported, but explicit event-to-event graph edges are not yet written.",
+    "root_cause_ranking": "The report produces candidate explanations but does not yet rank the earliest causal event using a graph.",
+    "additional_log_depth": [
+      "Apache error logs",
+      "Puppet logs",
+      "VNC logs",
+      "mail logs",
+      "application-specific formats beyond the implemented sources"
+    ],
+    "limitations": [
+      "A shared time window is useful supporting evidence but must not be treated as proof of causation.",
+      "The engine does not currently deduplicate semantically identical evidence repeated by raw logs and Wazuh.",
+      "DNS events with no year are explicitly marked unknown-year to avoid false chronology.",
+      "Candidate confidence is heuristic and should be explained as evidence corroboration, not certainty."
+    ]
+  },
+  "next_task": {
+    "name": "Implement the correlation engine in rca_engine.py",
+    "goal": "Create an investigation graph from normalized events and write rca_output/<scenario-name>/investigation_graph.json.",
+    "entity_types": ["event", "host", "user", "IP", "process", "file", "domain", "URL", "request ID"],
+    "edge_schema": {
+      "from": "entity or event identifier",
+      "to": "entity or event identifier",
+      "relation": "relationship label",
+      "reason": "human-readable evidence rule that created the edge",
+      "confidence": "rule confidence from 0.0 to 1.0",
+      "event_ids": "source event identifiers supporting the relationship"
+    },
+    "initial_rules": [
+      {
+        "relation": "same_web_request",
+        "when": "two events share a non-empty request_id",
+        "evidence": "Nextcloud audit and application records"
+      },
+      {
+        "relation": "logged_in_then_acted",
+        "when": "successful authentication and later web activity share the same user and source IP within two minutes",
+        "evidence": "application audit plus application log"
+      },
+      {
+        "relation": "spawned_process",
+        "when": "one process event PID matches another event parent PID",
+        "evidence": "Linux audit PID fields"
+      },
+      {
+        "relation": "downloaded_then_executed",
+        "when": "a filename in a web/application command also appears as an executable path or process name",
+        "evidence": "workflow command plus Linux audit"
+      },
+      {
+        "relation": "connected_to",
+        "when": "the same external IP appears in web, proxy, SSH, DNS, or Suricata evidence",
+        "evidence": "shared IP entity across independent sources"
+      },
+      {
+        "relation": "resolved_then_connected",
+        "when": "a DNS domain matches the hostname portion of a later proxy URL",
+        "evidence": "DNS query plus Squid request"
+      },
+      {
+        "relation": "created_persistence",
+        "when": "a suspicious login or process event precedes a new user, cron job, authorized SSH key, or systemd persistence event",
+        "evidence": "authentication/process records plus persistence_change"
+      }
+    ],
+    "real_target_example": {
+      "scenario": "7-6",
+      "expected_graph_chain": [
+        "IP:192.42.1.174 -> logged_in_as -> User:alice",
+        "User:alice -> configured -> Nextcloud workflow",
+        "Workflow -> executed -> Process:curl",
+        "Process:curl -> downloaded_then_executed -> File:rJZMoLeJ",
+        "File:rJZMoLeJ -> connected_to -> IP:192.42.1.174:4444"
+      ]
+    }
+  }
+}

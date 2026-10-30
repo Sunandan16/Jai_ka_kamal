@@ -1,0 +1,18 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Dataset and outputs (large / generated)
+Data/
+rca_output/
+archive/
+
+# Secrets
+.env
